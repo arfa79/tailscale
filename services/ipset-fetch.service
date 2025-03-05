@@ -8,8 +8,8 @@ Wants=ipset-fetch.timer
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash ~/tailscale/shells/fetch-ipset-from-country.bash ir
-ExecStart=/usr/bin/bash ~/tailscale/shells/fetch-ipset-from-asn.bash 32590
+ExecStart=/usr/bin/bash ~/tailscale/shells/fetch-ipset-country.bash ir
+ExecStart=/usr/bin/bash ~/tailscale/shells/fetch-ipset-asn.bash 32590
 
 [Install]
 WantedBy=multi-user.target

@@ -1,14 +1,5 @@
 #!/bin/bash
-usage() {
-    echo "Usage: $0 [ZONE]"
-}
-
-if [ $# -ne 1 ]; then
-    usage
-    exit 1
-fi
-
-ZONE="${1}"
+ZONE="ir"
 
 if sudo ipset list $ZONE -q > /dev/null 2>&1; then
     echo "$ZONE ipset exists. Flushing old entries..."
