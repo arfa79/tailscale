@@ -1,0 +1,12 @@
+# Testing dependencies for Tailscale auto-deployment system
+
+# Core testing framework
+pytest>=7.4.0
+pytest-cov>=4.1.0        # Coverage reporting
+pytest-mock>=3.11.0      # Enhanced mocking utilities
+pytest-xdist>=3.3.0      # Parallel test execution
+
+# Additional testing utilities  
+factory-boy>=3.3.0       # Test data factories
+freezegun>=1.2.0         # Time mocking for tests
+responses>=0.23.0        # HTTP request mocking

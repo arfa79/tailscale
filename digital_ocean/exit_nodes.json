@@ -1,0 +1,12 @@
+[
+  {
+    "droplet_id": "474344405",
+    "name": "do-exit-fra1",
+    "public_ip": "209.38.231.232",
+    "tailscale_ip": "unknown",
+    "region": "fra1",
+    "status": "unhealthy",
+    "created_at": "2025-06-15T10:48:44.511956+00:00",
+    "last_checked": "2025-06-15T10:48:44.511956+00:00"
+  }
+]

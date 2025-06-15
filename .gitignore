@@ -2,3 +2,16 @@
 state
 .venv
 sandbox
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
