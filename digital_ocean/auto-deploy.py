@@ -9,7 +9,6 @@ on DigitalOcean droplets using cloud-init for zero-touch deployment.
 import json
 import logging
 import os
-import signal
 import sys
 import time
 import threading
@@ -61,6 +60,7 @@ class Config:
     max_nodes: int = 3
     health_check_interval: int = 300
     log_level: str = "INFO"
+    dry_run: bool = False
     
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -69,8 +69,7 @@ class Config:
         if not self.ts_authkey:
             raise ConfigurationError("TS_AUTHKEY is required")
         if self.target_nodes > self.max_nodes:
-            raise ConfigurationError("target_nodes cannot exceed max_nodes")
-    
+            raise ConfigurationError("target_nodes cannot exceed max_nodes")    
     @classmethod
     def from_env(cls) -> 'Config':
         """Create configuration from environment variables."""
@@ -86,6 +85,7 @@ class Config:
             max_nodes=int(os.getenv("MAX_EXIT_NODES", "3")),
             health_check_interval=int(os.getenv("HEALTH_CHECK_INTERVAL", "300")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
+            dry_run=os.getenv("DRY_RUN", "false").lower() in ("true", "1"),
         )
 
 
@@ -246,11 +246,6 @@ class TailscaleExitNodeManager:
         self.do_client = DigitalOceanClient(config.do_token, logger)
         self.cloud_init_generator = CloudInitScriptGenerator()
         self.lock = threading.Lock()
-        self.shutdown_requested = False
-        
-        # Setup signal handlers
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
         
         self.droplets: List[digitalocean.Droplet] = []
         self.regions: List[digitalocean.Region] = []
@@ -263,12 +258,6 @@ class TailscaleExitNodeManager:
         
         self.exit_nodes_file = Path("exit_nodes.json")
         self.exit_nodes: List[ExitNodeInfo] = self._load_exit_nodes()
-
-    def _signal_handler(self, signum: int, frame) -> None:
-        """Handle shutdown signals gracefully."""
-        signal_name = signal.Signals(signum).name
-        self.logger.info(f"Received {signal_name}, initiating graceful shutdown...")
-        self.shutdown_requested = True
 
     def _init_do_resources(self) -> None:
         """Initialize DO resources with error handling."""
@@ -397,7 +386,7 @@ class TailscaleExitNodeManager:
         stop=tenacity.stop_after_attempt(3),
         before_sleep=tenacity.before_sleep_log(logging.getLogger("tailscale_autodeploy"), logging.WARNING)
     )
-    def _create_droplet(self) -> digitalocean.Droplet:
+    def _create_droplet(self) -> Optional[digitalocean.Droplet]:
         """Create droplet with cloud-init for full automation."""
         droplet_name = f"{self.config.name_prefix}-{self.region.slug}-{int(time.time())}"
         
@@ -422,6 +411,26 @@ class TailscaleExitNodeManager:
             backups=False
         )
         
+        # Dry run check - execute all preparation logic but don't create
+        if self.config.dry_run:
+            self.logger.info("=" * 60)
+            self.logger.info("DRY RUN: Droplet Creation Plan")
+            self.logger.info("=" * 60)
+            self.logger.info(f"Droplet Name: {droplet_name}")
+            self.logger.info(f"Region: {self.region.slug}")
+            self.logger.info(f"Size: {self.size.slug}")
+            self.logger.info(f"Monthly Price: ${self.size.price_monthly}")
+            self.logger.info(f"Image: {image_obj.slug}")
+            self.logger.info(f"Image ID: {image_obj.id}")
+            self.logger.info(f"Tags: {droplet.tags}")
+            self.logger.info(f"Cloud-init Script Length: {len(cloud_init_script)} characters")
+            self.logger.info(f"SSH Keys: {len(droplet.ssh_keys)} configured")
+            self.logger.info(f"Backups Enabled: {droplet.backups}")
+            self.logger.info("=" * 60)
+            self.logger.info("DRY RUN: Droplet creation simulated successfully")
+            self.logger.info("=" * 60)
+            return None
+        
         self.logger.info(f"Attempting to create droplet: {droplet_name} in {self.region.slug} with image {image_obj.slug}")
         droplet.create()
         self.logger.info(f"Droplet creation initiated for {droplet_name} (Action ID: {droplet.action_ids[-1] if droplet.action_ids else 'N/A'})")
@@ -436,7 +445,7 @@ class TailscaleExitNodeManager:
             raise DropletCreationError(f"Droplet {created_droplet.name} created but no IP address was assigned.")
             
         self.logger.info(f"Droplet {created_droplet.name} created successfully with IP: {created_droplet.ip_address}")
-        return created_droplet    @tenacity.retry(
+        return created_droplet@tenacity.retry(
         retry=tenacity.retry_if_exception_type(NodeHealthCheckError),
         wait=tenacity.wait_fixed(30),
         stop=tenacity.stop_after_attempt(10),
@@ -453,11 +462,32 @@ class TailscaleExitNodeManager:
         except requests.RequestException as e:
             self.logger.debug(f"HTTP readiness check for {ip} failed: {e}")
         raise NodeHealthCheckError(f"HTTP service on {ip}:8080 not ready after multiple attempts.")
+
     def _provision_single_node(self) -> Optional[ExitNodeInfo]:
         """Provision a single exit node. Returns ExitNodeInfo if successful."""
         droplet = None
         try:
             droplet = self._create_droplet()
+            
+            # Handle dry run case
+            if droplet is None and self.config.dry_run:
+                self.logger.info("DRY RUN: Node provisioning successfully simulated")
+                # Return simulated ExitNodeInfo with clear placeholders
+                return ExitNodeInfo(
+                    droplet_id="DRY-RUN-ID",
+                    name=f"{self.config.name_prefix}-{self.region.slug}-{int(time.time())}-simulated",
+                    public_ip="0.0.0.0",
+                    tailscale_ip="0.0.0.0",
+                    region=self.region.slug,
+                    status='simulated',
+                    created_at=datetime.now(timezone.utc),
+                    last_checked=datetime.now(timezone.utc)
+                )
+            
+            # Regular flow for actual provisioning
+            if droplet is None:
+                raise DropletCreationError("Droplet creation returned None unexpectedly")
+                
             self._wait_for_http_ready(droplet.ip_address)
             
             node_status_data = self._get_node_status(droplet)
@@ -574,16 +604,24 @@ class TailscaleExitNodeManager:
 
     def run(self) -> None:
         """Main run loop for continuous operation."""
+        if self.config.dry_run:
+            self.logger.info("=" * 60)
+            self.logger.info("DRY RUN MODE ENABLED")
+            self.logger.info("No actual resources will be created or destroyed")
+            self.logger.info("All operations will be simulated with detailed logging")
+            self.logger.info("=" * 60)
+        
         self.logger.info("Starting Tailscale exit node auto-deployment manager...")
         self.logger.info(f"Configuration: Target nodes: {self.config.target_nodes}, Max nodes: {self.config.max_nodes}, Health check interval: {self.config.health_check_interval}s")
         
-        while not self.shutdown_requested:
+        while True:
             try:
-                self.logger.info("Starting management cycle...")
+                cycle_prefix = "DRY RUN: " if self.config.dry_run else ""
+                self.logger.info(f"{cycle_prefix}Starting management cycle...")
                 
                 # Check existing nodes
                 healthy_nodes = self._check_existing_nodes()
-                self.logger.info(f"Found {len(healthy_nodes)} healthy nodes out of {len(self.exit_nodes)} tracked nodes")
+                self.logger.info(f"{cycle_prefix}Found {len(healthy_nodes)} healthy nodes out of {len(self.exit_nodes)} tracked nodes")
                 
                 # Clean up failed nodes
                 self._cleanup_failed_nodes()
@@ -594,38 +632,30 @@ class TailscaleExitNodeManager:
                 
                 if needed > 0:
                     if len(self.exit_nodes) + needed <= self.config.max_nodes:
-                        self.logger.info(f"Need {needed} more nodes to reach target of {self.config.target_nodes}")
+                        self.logger.info(f"{cycle_prefix}Need {needed} more nodes to reach target of {self.config.target_nodes}")
                         self._provision_nodes(needed)
                     else:
                         max_can_create = max(0, self.config.max_nodes - len(self.exit_nodes))
                         if max_can_create > 0:
-                            self.logger.warning(f"Would need {needed} nodes but limited by max_nodes. Creating {max_can_create} nodes.")
+                            self.logger.warning(f"{cycle_prefix}Would need {needed} nodes but limited by max_nodes. Creating {max_can_create} nodes.")
                             self._provision_nodes(max_can_create)
                         else:
-                            self.logger.warning(f"Cannot create more nodes: already at max_nodes limit ({self.config.max_nodes})")
+                            self.logger.warning(f"{cycle_prefix}Cannot create more nodes: already at max_nodes limit ({self.config.max_nodes})")
                 else:
-                    self.logger.info("Target node count reached, no provisioning needed")
+                    self.logger.info(f"{cycle_prefix}Target node count reached, no provisioning needed")
                 
                 # Save current state
                 self._save_exit_nodes()
                 
-                self.logger.info(f"Management cycle complete. Sleeping for {self.config.health_check_interval} seconds...")
+                self.logger.info(f"{cycle_prefix}Management cycle complete. Sleeping for {self.config.health_check_interval} seconds...")
                 
-                # Sleep with shutdown check
-                for _ in range(self.config.health_check_interval):
-                    if self.shutdown_requested:
-                        break
-                    time.sleep(1)
+                # Sleep between cycles
+                time.sleep(self.config.health_check_interval)
                     
-            except KeyboardInterrupt:
-                self.logger.info("Received interrupt signal, shutting down...")
-                break
             except Exception as e:
                 self.logger.error(f"Unhandled error in management loop: {e}", exc_info=True)
                 self.logger.info("Sleeping for 60 seconds due to error before retrying cycle.")
                 time.sleep(60)
-        
-        self.logger.info("Shutdown complete.")
 
 
 def main() -> None:
@@ -646,12 +676,6 @@ def main() -> None:
         else:
             print(f"CRITICAL Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
-    except KeyboardInterrupt:
-        if logger:
-            logger.info("Application shutdown requested by user (KeyboardInterrupt in main).")
-        else:
-            print("\nShutdown requested by user")
-        sys.exit(0)
     except Exception as e:
         if logger:
             logger.critical(f"An unexpected critical error occurred: {e}", exc_info=True)
