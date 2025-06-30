@@ -52,7 +52,7 @@ class Config:
     """Application configuration."""
     do_token: str
     ts_authkey: str
-    login_server: str = "https://controlplane.tailscale.com"
+    login_server: str = "https://headscale.netall.live:443"
     region: str = "fra1"
     image_name: str = "ubuntu-22-04"
     name_prefix: str = "tailscale-exit"
@@ -60,7 +60,6 @@ class Config:
     max_nodes: int = 3
     health_check_interval: int = 300
     log_level: str = "INFO"
-    dry_run: bool = False
     
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -77,7 +76,7 @@ class Config:
         return cls(
             do_token=os.getenv("DO_TOKEN", ""),
             ts_authkey=os.getenv("TS_AUTHKEY", ""),
-            login_server=os.getenv("LOGIN_SERVER", "https://controlplane.tailscale.com"),
+            login_server=os.getenv("LOGIN_SERVER", "https://headscale.netall.live:443"),
             region=os.getenv("DO_REGION", "fra1"),
             image_name=os.getenv("DO_IMAGE", "ubuntu-22-04"),
             name_prefix=os.getenv("NAME_PREFIX", "tailscale-exit"),
@@ -85,7 +84,6 @@ class Config:
             max_nodes=int(os.getenv("MAX_EXIT_NODES", "3")),
             health_check_interval=int(os.getenv("HEALTH_CHECK_INTERVAL", "300")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
-            dry_run=os.getenv("DRY_RUN", "false").lower() in ("true", "1"),
         )
 
 
@@ -411,26 +409,6 @@ class TailscaleExitNodeManager:
             backups=False
         )
         
-        # Dry run check - execute all preparation logic but don't create
-        if self.config.dry_run:
-            self.logger.info("=" * 60)
-            self.logger.info("DRY RUN: Droplet Creation Plan")
-            self.logger.info("=" * 60)
-            self.logger.info(f"Droplet Name: {droplet_name}")
-            self.logger.info(f"Region: {self.region.slug}")
-            self.logger.info(f"Size: {self.size.slug}")
-            self.logger.info(f"Monthly Price: ${self.size.price_monthly}")
-            self.logger.info(f"Image: {image_obj.slug}")
-            self.logger.info(f"Image ID: {image_obj.id}")
-            self.logger.info(f"Tags: {droplet.tags}")
-            self.logger.info(f"Cloud-init Script Length: {len(cloud_init_script)} characters")
-            self.logger.info(f"SSH Keys: {len(droplet.ssh_keys)} configured")
-            self.logger.info(f"Backups Enabled: {droplet.backups}")
-            self.logger.info("=" * 60)
-            self.logger.info("DRY RUN: Droplet creation simulated successfully")
-            self.logger.info("=" * 60)
-            return None
-        
         self.logger.info(f"Attempting to create droplet: {droplet_name} in {self.region.slug} with image {image_obj.slug}")
         droplet.create()
         self.logger.info(f"Droplet creation initiated for {droplet_name} (Action ID: {droplet.action_ids[-1] if droplet.action_ids else 'N/A'})")
@@ -468,21 +446,6 @@ class TailscaleExitNodeManager:
         droplet = None
         try:
             droplet = self._create_droplet()
-            
-            # Handle dry run case
-            if droplet is None and self.config.dry_run:
-                self.logger.info("DRY RUN: Node provisioning successfully simulated")
-                # Return simulated ExitNodeInfo with clear placeholders
-                return ExitNodeInfo(
-                    droplet_id="DRY-RUN-ID",
-                    name=f"{self.config.name_prefix}-{self.region.slug}-{int(time.time())}-simulated",
-                    public_ip="0.0.0.0",
-                    tailscale_ip="0.0.0.0",
-                    region=self.region.slug,
-                    status='simulated',
-                    created_at=datetime.now(timezone.utc),
-                    last_checked=datetime.now(timezone.utc)
-                )
             
             # Regular flow for actual provisioning
             if droplet is None:
@@ -604,24 +567,16 @@ class TailscaleExitNodeManager:
 
     def run(self) -> None:
         """Main run loop for continuous operation."""
-        if self.config.dry_run:
-            self.logger.info("=" * 60)
-            self.logger.info("DRY RUN MODE ENABLED")
-            self.logger.info("No actual resources will be created or destroyed")
-            self.logger.info("All operations will be simulated with detailed logging")
-            self.logger.info("=" * 60)
-        
         self.logger.info("Starting Tailscale exit node auto-deployment manager...")
         self.logger.info(f"Configuration: Target nodes: {self.config.target_nodes}, Max nodes: {self.config.max_nodes}, Health check interval: {self.config.health_check_interval}s")
         
         while True:
             try:
-                cycle_prefix = "DRY RUN: " if self.config.dry_run else ""
-                self.logger.info(f"{cycle_prefix}Starting management cycle...")
+                self.logger.info("Starting management cycle...")
                 
                 # Check existing nodes
                 healthy_nodes = self._check_existing_nodes()
-                self.logger.info(f"{cycle_prefix}Found {len(healthy_nodes)} healthy nodes out of {len(self.exit_nodes)} tracked nodes")
+                self.logger.info(f"Found {len(healthy_nodes)} healthy nodes out of {len(self.exit_nodes)} tracked nodes")
                 
                 # Clean up failed nodes
                 self._cleanup_failed_nodes()
@@ -632,22 +587,22 @@ class TailscaleExitNodeManager:
                 
                 if needed > 0:
                     if len(self.exit_nodes) + needed <= self.config.max_nodes:
-                        self.logger.info(f"{cycle_prefix}Need {needed} more nodes to reach target of {self.config.target_nodes}")
+                        self.logger.info(f"Need {needed} more nodes to reach target of {self.config.target_nodes}")
                         self._provision_nodes(needed)
                     else:
                         max_can_create = max(0, self.config.max_nodes - len(self.exit_nodes))
                         if max_can_create > 0:
-                            self.logger.warning(f"{cycle_prefix}Would need {needed} nodes but limited by max_nodes. Creating {max_can_create} nodes.")
+                            self.logger.warning(f"Would need {needed} nodes but limited by max_nodes. Creating {max_can_create} nodes.")
                             self._provision_nodes(max_can_create)
                         else:
-                            self.logger.warning(f"{cycle_prefix}Cannot create more nodes: already at max_nodes limit ({self.config.max_nodes})")
+                            self.logger.warning(f"Cannot create more nodes: already at max_nodes limit ({self.config.max_nodes})")
                 else:
-                    self.logger.info(f"{cycle_prefix}Target node count reached, no provisioning needed")
+                    self.logger.info("Target node count reached, no provisioning needed")
                 
                 # Save current state
                 self._save_exit_nodes()
                 
-                self.logger.info(f"{cycle_prefix}Management cycle complete. Sleeping for {self.config.health_check_interval} seconds...")
+                self.logger.info(f"Management cycle complete. Sleeping for {self.config.health_check_interval} seconds...")
                 
                 # Sleep between cycles
                 time.sleep(self.config.health_check_interval)
